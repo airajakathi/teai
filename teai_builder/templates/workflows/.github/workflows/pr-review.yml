@@ -1,0 +1,14 @@
+name: PR Review
+on:
+  pull_request:
+    branches: ["main"]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Comment PR checklist
+        run: echo "Replace this stub with automated review logic or agent tooling."

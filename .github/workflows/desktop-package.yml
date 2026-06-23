@@ -1,0 +1,115 @@
+name: Desktop Package
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check release metadata
+        run: python scripts/check_release_metadata.py
+
+  package:
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Linux desktop dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-0 \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-0 \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-1 \
+            libayatana-appindicator3-dev \
+            librsvg2-2 \
+            librsvg2-dev \
+            libappindicator3-1 \
+            libasound2 \
+            libnss3 \
+            libxss1 \
+            libxtst6 \
+            libx11-xcb1 \
+            libxcb-dri3-0 \
+            libgbm1 \
+            libdrm2 \
+            build-essential \
+            patchelf
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Install dependencies
+        run: |
+          pip install -e .
+
+      - name: Build WebUI
+        working-directory: webui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Package desktop app
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -o pipefail
+          python -m PyInstaller \
+            --name teai_builder_desktop \
+            --clean \
+            --noconfirm \
+            --distpath dist-desktop/${{ matrix.os }} \
+            --workpath build-desktop/${{ matrix.os }} \
+            --specpath build-desktop/${{ matrix.os }} \
+            --add-data "teai_builder/web/dist:web/dist" \
+            --hidden-import teai_builder.agent.checkpoint \
+            --hidden-import teai_builder.agent.goal_validator \
+            --hidden-import teai_builder.agent.parallel_executor \
+            --hidden-import teai_builder.agent.task_dependencies \
+            --hidden-import teai_builder.agent.workflow_engine \
+            --hidden-import teai_builder.agent.workflows \
+            --hidden-import teai_builder.agent.dream \
+            --hidden-import teai_builder.agent.distill \
+            --hidden-import teai_builder.command.builtin \
+            --hidden-import teai_builder.webui \
+            --hidden-import teai_builder.webui.gateway_services \
+            --collect-all teai_builder \
+            --collect-all teai_builder.webui \
+            teai_builder/desktop/launcher.py
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: teai-builder-${{ matrix.os }}
+          path: |
+            dist-desktop/${{ matrix.os }}/*
+            !dist-desktop/${{ matrix.os }}/**/*.log
+          retention-days: 14

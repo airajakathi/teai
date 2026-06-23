@@ -1,0 +1,413 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect Changed Areas
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      webui: ${{ steps.filter.outputs.webui }}
+      docs: ${{ steps.filter.outputs.docs }}
+      packaging: ${{ steps.filter.outputs.packaging }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect changed files
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            python:
+              - ".github/workflows/ci.yml"
+              - "pyproject.toml"
+              - "teai_builder/**/*.py"
+              - "tests/**/*.py"
+              - "scripts/*.py"
+            webui:
+              - ".github/workflows/ci.yml"
+              - "webui/**"
+            docs:
+              - ".github/workflows/ci.yml"
+              - "README.md"
+              - "docs/**"
+              - "scripts/generate_config_reference.py"
+              - "teai_builder/config/schema.py"
+              - "teai_builder/agent/tools/*.py"
+            packaging:
+              - ".github/workflows/ci.yml"
+              - ".github/workflows/desktop-package.yml"
+              - "LICENSE"
+              - "README.md"
+              - "THIRD_PARTY_NOTICES.md"
+              - "bridge/**"
+              - "docs/**"
+              - "hatch_build.py"
+              - "pyproject.toml"
+              - "scripts/*.py"
+              - "teai_builder/**/*.py"
+              - "webui/**"
+
+  lint:
+    name: Ruff
+    needs: changes
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.docs == 'true' || needs.changes.outputs.packaging == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libolm-dev build-essential
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run Ruff
+        run: uv run ruff check teai_builder tests scripts
+
+  python-tests:
+    name: Python Tests
+    needs: changes
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.packaging == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libolm-dev build-essential
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run tests
+        run: uv run pytest tests/
+
+  docs:
+    name: Generated Docs
+    needs: changes
+    if: needs.changes.outputs.docs == 'true' || needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Verify generated configuration reference
+        run: uv run python scripts/generate_config_reference.py --check
+
+  compliance:
+    name: Compliance
+    needs: changes
+    if: needs.changes.outputs.docs == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.packaging == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check release metadata
+        run: python scripts/check_release_metadata.py
+
+  webui:
+    name: WebUI
+    needs: changes
+    if: needs.changes.outputs.webui == 'true' || needs.changes.outputs.packaging == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Install dependencies
+        working-directory: webui
+        run: npm ci
+
+      - name: Lint
+        working-directory: webui
+        run: npm run lint
+
+      - name: Test
+        working-directory: webui
+        run: npm run test
+
+      - name: Build
+        working-directory: webui
+        run: npm run build
+
+  runtime-smoke:
+    name: Runtime Smoke
+    needs: changes
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.packaging == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      STEPFUN_API_KEY: ${{ secrets.STEPFUN_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libolm-dev build-essential
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Check smoke secret
+        id: smoke_secret
+        shell: bash
+        run: |
+          if [ -n "${STEPFUN_API_KEY}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip runtime smoke
+        if: steps.smoke_secret.outputs.enabled != 'true'
+        run: echo "Skipping runtime smoke; STEPFUN_API_KEY is not configured."
+
+      - name: Prepare runtime smoke config
+        if: steps.smoke_secret.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          mkdir -p .ci/runtime-workspace
+          cat > .ci/runtime-smoke.config.json <<'JSON'
+          {
+            "agents": {
+              "defaults": {
+                "workspace": ".ci/runtime-workspace",
+                "model": "step-3.7-flash",
+                "provider": "stepfun",
+                "maxTokens": 8192,
+                "contextWindowTokens": 262144,
+                "temperature": 0.1
+              }
+            },
+            "providers": {
+              "stepfun": {
+                "apiKey": "${STEPFUN_API_KEY}",
+                "apiBase": "https://api.stepfun.ai/step_plan/v1"
+              }
+            },
+            "model_presets": {
+              "step-3-5-flash": {
+                "label": "Step 3.5 Flash",
+                "model": "step-3.5-flash",
+                "provider": "stepfun",
+                "maxTokens": 8192,
+                "contextWindowTokens": 262144,
+                "temperature": 0.1,
+                "reasoningEffort": null
+              },
+              "step-3-5-flash-2603": {
+                "label": "Step 3.5 Flash 2603",
+                "model": "step-3.5-flash-2603",
+                "provider": "stepfun",
+                "maxTokens": 8192,
+                "contextWindowTokens": 262144,
+                "temperature": 0.1,
+                "reasoningEffort": null
+              }
+            }
+          }
+          JSON
+
+      - name: Run runtime smoke
+        if: steps.smoke_secret.outputs.enabled == 'true'
+        run: |
+          uv run python scripts/runtime_smoke.py \
+            --config .ci/runtime-smoke.config.json \
+            --workspace .ci/runtime-workspace
+
+  gateway-smoke:
+    name: Gateway Smoke
+    needs: changes
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.packaging == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libolm-dev build-essential
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Prepare gateway smoke config
+        shell: bash
+        run: |
+          mkdir -p .ci/gateway-workspace
+          cat > .ci/gateway-smoke.config.json <<'JSON'
+          {
+            "agents": {
+              "defaults": {
+                "workspace": ".ci/gateway-workspace",
+                "model": "step-3.7-flash",
+                "provider": "stepfun",
+                "maxTokens": 8192,
+                "contextWindowTokens": 262144,
+                "temperature": 0.1
+              }
+            },
+            "providers": {
+              "stepfun": {
+                "apiKey": "test-key",
+                "apiBase": "https://api.stepfun.ai/step_plan/v1"
+              }
+            },
+            "gateway": {
+              "host": "127.0.0.1",
+              "port": 18791
+            },
+            "channels": {
+              "websocket": {
+                "enabled": true,
+                "host": "127.0.0.1",
+                "port": 8766,
+                "path": "/ws"
+              }
+            }
+          }
+          JSON
+
+      - name: Run gateway smoke
+        run: uv run python scripts/gateway_smoke.py --config .ci/gateway-smoke.config.json
+
+  package:
+    name: Package Build
+    needs: changes
+    if: needs.changes.outputs.packaging == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Install WebUI dependencies
+        working-directory: webui
+        run: npm ci
+
+      - name: Build WebUI assets
+        working-directory: webui
+        run: npm run build
+
+      - name: Build Python distributions
+        run: uv build
+
+  final-check:
+    name: Final Check
+    if: always()
+    needs: [changes, lint, python-tests, docs, compliance, webui, runtime-smoke, gateway-smoke, package]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate job results
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          PYTHON_TESTS_RESULT: ${{ needs.python-tests.result }}
+          DOCS_RESULT: ${{ needs.docs.result }}
+          COMPLIANCE_RESULT: ${{ needs.compliance.result }}
+          WEBUI_RESULT: ${{ needs.webui.result }}
+          RUNTIME_SMOKE_RESULT: ${{ needs.runtime-smoke.result }}
+          GATEWAY_SMOKE_RESULT: ${{ needs.gateway-smoke.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          for result in \
+            "$LINT_RESULT" \
+            "$PYTHON_TESTS_RESULT" \
+            "$DOCS_RESULT" \
+            "$COMPLIANCE_RESULT" \
+            "$WEBUI_RESULT" \
+            "$RUNTIME_SMOKE_RESULT" \
+            "$GATEWAY_SMOKE_RESULT" \
+            "$PACKAGE_RESULT"
+          do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              exit 1
+            fi
+          done
